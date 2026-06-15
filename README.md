@@ -10,7 +10,7 @@ This README provides a high-level overview of the project. For a more comprehens
 
 The complete project source code can be accessed [here](code/Motor-TPL-Pricing-Project.Rmd).
 
-
+The dataset used in this project can be downloaded [here](https://raw.githubusercontent.com/S7aru/Motor-TPL-GLM-Pricing-Model/main/data/Raw_French_Motor_Insurance_Data_2.xlsx).
 
 ## Dataset
 
