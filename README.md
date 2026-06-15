@@ -6,7 +6,7 @@ This project develops a motor TPL pricing model using real insurer data from the
 
 The primary focus is not the GLM itself, but the actuarial judgement required to address real-world data limitations. The project documents the assumptions, preprocessing decisions, and modelling choices used to transform raw insurance data into a pricing-ready dataset and derive final rating relativities using a Tweedie GLM.
 
-This README provides a high-level overview of the project. For a more comprehensive walkthrough of the data preparation process, actuarial assumptions, preprocessing decisions, modelling methodology, validation results, and selected code snippets, see the full R Markdown report [here](https://S7aru.github.io/Motor-TPL-GLM-Pricing-Model/). 
+This README provides a high-level overview of the project. For a more comprehensive walkthrough of the data preparation process, actuarial assumptions, preprocessing decisions, modelling methodology, validation results, and selected code snippets, see the full R Markdown report [here](https://S7aru.github.io/Motor-TPL-GLM-Pricing-Model). 
 
 The complete project source code can be accessed [here](code/Motor-TPL-Pricing-Project.Rmd).
 
