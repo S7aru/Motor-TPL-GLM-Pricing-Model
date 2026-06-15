@@ -29,7 +29,7 @@ The claims dataset contains the corresponding policy and vehicle identifiers, cl
 Several practical challenges were identified during the analysis:
 
 - Original policy identifiers were not always unique due to mid-term endorsements.
-- The dataset was aggregated on a calendar-year basis, requiring assumptions to approximate a policy-year pricing framework.
+- The dataset was aggregated on a calendar-year basis, not a on a policy year basis.
 - Accident and payment dates were unavailable, limiting traditional reserving and trending analyses.
 - Claims were recorded as transactions rather than individual claims, with no unique claim identifiers available, preventing reliable frequency modelling.
 - Negative claim amounts were present due to recoveries (e.g., salvage and subrogation).
@@ -141,4 +141,4 @@ Retained rating factors include:
 - Business Type
 - Vehicle Power
 
-![Rating Relativities](figures/rating_relativities.png)
+![Rating Relativities](figures/relativities.png)
