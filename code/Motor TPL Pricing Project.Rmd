@@ -1,0 +1,765 @@
+---
+title: "Motor TPL Pricing Project"
+date: "2026-06-01"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    df_print: paged
+---
+# Introduction to The Data.
+For this project, I use data from a real French insurer, provided as part of the Actuarial Pricing Game Season 2 (2016) organised by the French Institute of Actuaries. The data set relates to Motor TPL Fleet contracts and consists of two main components:
+
+1) Policy data
+2) Claims data
+
+```{r setup, message=FALSE, warning=FALSE,include=FALSE}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(ggplot2)
+library(forcats)
+library(tweedie)
+library(statmod)
+library(stringr)
+library(tibble)
+library(knitr)
+library(kableExtra)
+policy_data = read_excel("Raw_French_Motor_Insurance_Data_2.xlsx",1)
+claims_data = read_excel("Raw_French_Motor_Insurance_Data_2.xlsx",2)
+```
+
+Below is a brief summary of the variables included in those two datasets.
+
+```{r,echo=FALSE}
+policy_dictionary <- tibble(
+  Variable = names(policy_data),
+  Type = sapply(policy_data, function(x) class(x)[1]),
+  Missing = sapply(policy_data, function(x) sum(is.na(x))),
+  Unique_Values = sapply(policy_data, n_distinct)
+)
+
+kable(
+  policy_dictionary,
+  caption = "Policy Dataset Variable Summary"
+)
+
+claims_dictionary <- tibble(
+  Variable = names(claims_data),
+  Type = sapply(claims_data, function(x) class(x)[1]),
+  Missing = sapply(claims_data, function(x) sum(is.na(x))),
+  Unique_Values = sapply(claims_data, n_distinct)
+)
+
+kable(
+  claims_dictionary,
+  caption = "Claims Dataset Variable Summary"
+)
+```
+
+
+Below is a peak at the actual data
+
+## Policy Data
+
+```{r}
+head(policy_data) 
+```
+
+## Claims Data
+```{r}
+head(claims_data) 
+```
+
+## Data Limitiations
+A key limitation of the current dataset is that it is aggregated on a calendar/financial year basis. Consequently, no policy spans multiple years (e.g., 2023–2024 or 2024–2025); all policies are truncated on or before 31 December of each year even if the policy start at 1 December. Since actuarial pricing is typically performed on a Policy Year (PY) basis, I will assume that the data has been aggregated accordingly for this project to ensure simplicity.
+
+# Policy Data Preparation 
+## Exposure Calculation
+```{r}
+policy_data = policy_data %>%
+  mutate(Exposure = as.numeric((EndDate - BeginDate+1)/365), .after = 3) 
+
+policy_data
+```
+
+Exposure Statistics
+
+```{r}
+Exposure_Stat = policy_data %>%
+    group_by(Year) %>%
+    summarise(
+      Minimum_Exposure = min(Exposure),
+      Average_Exposure = mean(Exposure),
+      Median_Exposure = median(Exposure),
+      Maximum_Exposure = max(Exposure)
+    )
+  
+  Exposure_Stat
+```
+
+## Unique ID Construction
+A key limitation of the dataset is that the original identifiers are not always unique. A single policy–vehicle combination may appear as multiple records within the same year due to mid-year endorsements. To facilitate accurate claim linkage, a new unique identifier was created by concatenating PolicyID, LicNb, and BeginDate.
+
+```{r}
+policy_data = policy_data %>%
+  mutate(UniqueID = paste(PolicyID, LicNb, as.numeric(BeginDate), sep = "_"),.before = 2) %>%
+  select(-c(PolicyID,LicNb)) #To remove the other IDs and redundant fields
+
+policy_data
+```
+
+# Claims Data Preparation 
+## Unique ID Construction
+
+To link the claims data back to the corresponding policies, I will construct the same policy identifier used in the policy dataset.
+
+```{r}
+claims_data = claims_data %>%
+  mutate(UniqueID = paste(PolicyID, LicNb, as.numeric(BeginDate), sep = "_"),.before = 2) %>%
+  select(-c(PolicyID,LicNb,BeginDate,EndDate)) #To remove the other IDs and redundant fields
+
+claims_data
+```
+
+## Extreme Tail of Claims
+Before trying to model the burning cost for pricing purposes, it is extremely important to check and possibly remove extreme outliers due to large or catastrophic claims and add them back as an overall loading if needed. 
+
+```{r}
+claims_quantiles = tibble(
+        Percentile = seq(from = 0.01, to = 1.00, by = 0.01),
+        Claim_Charge_Value = quantile(claims_data$ClaimCharge, probs = seq(from = 0.01, to = 1.00, by = 0.01))
+)
+claims_quantiles = claims_quantiles %>%
+  arrange(desc(Percentile))
+
+claims_quantiles
+```
+
+As seen above, the data do not seem to suffer from an extreme heavy tail, as the increases of 83% from the 95th percentile to the absolute maximum and 23% from the 99th percentile to the absolute maximum are relatively modest. This indicates a compressed upper tail and suggests the absence of exceptionally large claims within the portfolio. Thus no addiational capping is performed
+
+## Loss Development
+One challenge with the available data is that accident and payment dates are not included. Without this information, it is not possible to track how losses develop over time or estimate their ultimate values. Therefore, for the purposes of this project, I will assume that the reported incurred claims already represent ultimate losses (i.e., the current claims are fully developed).
+
+## Loss Trending   
+### Historical and Future Loss Periods
+For this project, I define the trend date as the midpoint between the average policy start date and the average policy end date. This assumes that, on average, claims occur halfway through the policy term.
+
+```{r,echo=FALSE}
+
+# To calculate the average midpoint between BeginDate & EndDate
+trend_summary <- policy_data %>%
+  mutate(TrendDateFraction = Year + (as.numeric(format(BeginDate, "%j")) + 
+         (as.numeric(format(EndDate, "%j")) - as.numeric(format(BeginDate, "%j"))) / 2) / 365) %>%
+  group_by(Year) %>%
+  summarise(
+    hist_loss_date = round(mean(TrendDateFraction), digits = 1),
+    .groups = "drop"
+  )
+
+# To take 2025's value (2025.5)
+mid_2025_hist_date <- trend_summary$hist_loss_date[trend_summary$Year == 2025]
+
+# Required years to trend losses to
+Trending_periods <- trend_summary %>%
+  mutate(
+    future_loss_date = 2026.5,
+    Trending_Years = 2026.5 - hist_loss_date,
+  )
+
+Trending_periods
+```
+
+### Determining the Loss Trend Factor
+To derive appropriate trend factors for projecting losses to future inflation-adjusted cost levels, actuaries typically analyze claim frequency, severity, and burning cost using paid claims data on a monthly or quarterly calendar-year basis. However, because detailed payment date information is not available in this dataset, the analysis will instead be based on annual policy-year burning costs.
+
+```{r}
+#Compute exposure per year
+Annual_Exposure = policy_data %>%
+  group_by(Year) %>%
+  summarise(Total_Exposure = sum(Exposure))
+
+#Compute ultimate claims per year
+Annual_Claims = claims_data %>%
+  group_by(Year) %>%
+  summarise(Total_Ultimate_Claims = sum(ClaimCharge))
+
+#Compute burning cost per year
+Trending_Analysis = Annual_Exposure %>%
+  left_join(Annual_Claims, by = "Year") %>%
+  mutate(Burning_Cost = Total_Ultimate_Claims/Total_Exposure)
+
+Trending_Analysis
+
+# Derive overall annual trend factor as [(2025 BC / 2023 BC)^0.5 - 1]
+Trending_Factors = ((Trending_Analysis$Burning_Cost[Trending_Analysis$Year == 2025])/(Trending_Analysis$Burning_Cost[Trending_Analysis$Year == 2023]))^0.5 - 1
+
+Trending_Factors
+
+#To combine trend periods and factors and calculate the total trend adjustment
+Trending_final = Trending_periods %>%
+  mutate(Trending_Factor = Trending_Factors) %>%
+  mutate(Trending_Adjustment_Multiplier = (1+Trending_Factors)^Trending_Years) %>%
+  select(-c(hist_loss_date,future_loss_date))
+
+Trending_final
+
+# To apply the trending factors
+claims_data = claims_data %>%
+  left_join(Trending_final) %>%
+  mutate(ClaimCharge = ClaimCharge * Trending_Adjustment_Multiplier) %>%
+  select(-c(Trending_Years,Trending_Factor,Trending_Adjustment_Multiplier))
+
+claims_data
+```
+
+## Dealing with recoveries  
+Another issue with the data is the presence of negative claims, likely due to salvage and subrogation recoveries. As Tweedie GLMs cannot handle negative burning costs, these claims were floored at zero before modelling and accounted for through a recovery adjustment afterwards (a negative loading).
+
+```{r}
+#To calculate the needed adjustment percentage
+Gross_Losses <- sum(pmax(claims_data$ClaimCharge, 0))
+Recoveries   <- sum(abs(pmin(claims_data$ClaimCharge, 0)))
+
+Recovery_Adjustment <- Recoveries / (Gross_Losses - Recoveries)
+Recovery_Adjustment
+
+#To actually floor the claims at 0
+claims_data = claims_data %>% 
+  group_by(UniqueID) %>%
+  summarise(ClaimCharge = sum(ClaimCharge)) %>%
+  mutate(ClaimCharge = pmax(0,ClaimCharge))
+claims_data
+```
+
+## Joining claims with policies data and calculating burning cost
+For the sake of this project, I'm doing direct BC GLM modelling and will not consider separate Frequency-Severity models mainly due to the transaction presentation of the claims data (each row is a payment not a claim, with no unique claim identifier, thus frequency would be overstated). Below is the calculation of BC for each policy.
+
+```{r}
+policy_data = policy_data %>% 
+  left_join(claims_data,by =  "UniqueID") %>% #Joining policy and claims data
+  mutate(ClaimCharge = if_else(is.na(ClaimCharge),0,ClaimCharge)) %>% #If policyID does not have claim, claim=0
+  mutate(Burning_Cost = ClaimCharge/Exposure,.before = BeginDate) %>%
+  select(-c(Year,BeginDate,EndDate, ClaimCharge)) %>%
+  arrange(desc(Burning_Cost))
+policy_data
+```
+
+# Burning Cost GLM 
+## Data Prep
+To get the categorical variables ready, I'm explicitly encoding them into quantities (0, 1, 2), excluding/merging fields where levels are volatile and establishing the base relativities for the model. Then I'll proceed to split the data into train and test sets.
+
+```{r}
+protected_cols <- c("UniqueID", "Exposure", "Burning_Cost")
+
+# All the categorical columns
+feature_cols <- setdiff(names(policy_data), protected_cols)
+
+# convert all feature columns to factors in one go
+policy_data <- policy_data %>%
+  mutate(across(all_of(feature_cols), as.factor))
+```
+
+Below is an extract of the smallest levels within the data.
+
+```{r,echo=FALSE}
+
+protected_cols <- c("UniqueID", "Exposure", "Burning_Cost")
+feature_cols   <- setdiff(names(policy_data), protected_cols)
+
+# Build an exposure diagnostic table
+exposure_diagnostics <- map_df(feature_cols, function(col) {
+  policy_data %>%
+    group_by(Level = as.character(.data[[col]])) %>%
+    summarise(
+      Total_Exposure = sum(Exposure, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Variable = col,
+      Pct_of_Portfolio = Total_Exposure / sum(policy_data$Exposure, na.rm = TRUE)
+    ) %>%
+    select(Variable, Level, Total_Exposure, Pct_of_Portfolio) 
+}) %>% 
+  arrange(Total_Exposure) 
+
+exposure_diagnostics
+```
+
+Based on the above table, we observe that some levels within certain columns have little amount of exposure (less than 400, or 1% of the data). For these, i will merge them into the next bigger category. For the SumInsured variable, most of the levels are not sufficient for analysis, thus i chose to exclude it from the model. Finally, i will assign the level that has the most exposure in each column. Then will split the data into train/test
+
+```{r,echo=FALSE}
+# 1. Drop SumInsured and isolate rating features
+policy_data  <- policy_data %>% select(-any_of("SumInsured"))
+feature_cols <- setdiff(names(policy_data), c("UniqueID", "Exposure", "Burning_Cost"))
+
+# 2. Clean, collapse, and relevel features dynamically
+for (col in feature_cols) {
+  
+  # Get exposure sums per level sorted from smallest to largest (stored in column 'n')
+  tab <- policy_data %>% count(Lvl = as.character(.data[[col]]), wt = Exposure) %>% arrange(n)
+  
+  thin  <- tab$Lvl[tab$n < 400]
+  valid <- tab$Lvl[tab$n >= 400]
+  
+  # Convert column to factor
+  x <- as.factor(policy_data[[col]])
+  
+  # Collapse thin levels into the next bigger level under the name "Other"
+  if (length(thin) > 0 && length(valid) > 0) {
+    x <- forcats::fct_collapse(x, Other = c(thin, valid[1]))
+  }
+  
+  # Identify the new highest exposure anchor and apply it as the baseline
+  new_max <- policy_data %>% count(Lvl = x, wt = Exposure) %>% slice_max(n, n = 1, with_ties = FALSE) %>% pull(Lvl)
+  policy_data[[col]] <- relevel(x, ref = as.character(new_max))
+}
+```
+
+
+```{r,echo=FALSE}
+# Loop through each feature and assign the base relativity to the category with most exposure in each column
+for (col in feature_cols) {
+  
+  # Find the specific level that has the maximum total exposure
+  highest_exp_level <- policy_data %>%
+    group_by(.data[[col]]) %>%
+    summarise(Total_Exp = sum(Exposure, na.rm = TRUE), .groups = "drop") %>%
+    slice_max(Total_Exp, n = 1, with_ties = FALSE) %>%
+    pull(.data[[col]]) %>%
+    as.character()
+  
+  policy_data[[col]] <- relevel(policy_data[[col]], ref = highest_exp_level)
+  
+  # Print out the choice to verify it's working as expected
+  message(paste0("Variable '", col, "' set to baseline: '", highest_exp_level, "'"))
+}
+
+
+# To Construct the model formula (Burning Cost = Pred1 + Pred2 + ...)
+model_formula <- as.formula(
+  paste("Burning_Cost ~", paste(feature_cols, collapse = " + "))
+)
+```
+
+To split the data into train/test
+
+```{r}
+# To split the data into train/test (80/20)
+set.seed(42) 
+
+train_idx  <- sample(1:nrow(policy_data), 0.8 * nrow(policy_data))
+train_set  <- policy_data[train_idx, ]
+test_set    <- policy_data[-train_idx, ]
+```
+
+## Initial Model
+To optimize the p for the Tweedie, i compared a sequence of GLMs with p spanning from 1.40 to 1.7, then 1.548 was found to be the optimal value based on the log likelihood metric.
+
+```{r,warning=FALSE,message=FALSE}
+invisible(
+  capture.output(
+    profile_results <- tweedie.profile(
+      formula = model_formula,
+      data = train_set,
+      weights = Exposure,
+      p.vec = seq(1.40, 1.70, 0.05),
+      do.plot = TRUE
+    )
+  )
+)
+
+optimal_p <- profile_results$p.max
+
+print(optimal_p)
+
+Original_tweedie_model <- glm(
+  formula = model_formula,
+  data    = train_set,
+  family  = tweedie(var.power = optimal_p, link.power = 0), 
+  weights = Exposure                                        
+)
+
+summary(Original_tweedie_model)
+
+```
+
+## Feature Selection
+I’m introducing the following manual feature selection decisions:
+
+- I would remove deductible, as coverage choices done by the policyholder are not usually included in GLM due to adverse selection (GLM can not differintiate between risk due to deductible and due to the type of people choosing it)
+
+- I would remove PolicyAgeCateg from the model since all levels are highly insignificant. As wellas FleetMgt, FleetSizeCateg, PayFreq and ChannelDist.
+
+- I would collapse some the levels into the baseline in fields like:
+  - Area: Keep A1 and A5 standalone since they are kinda significant, and merge the rest with the baseline
+  - PolicyCateg: Other to be collapsed into the baseline
+  - BusinessType: B2, B4, B5 and B8 to be merged with the baseline
+  - VehiclPower: P3-P6 and Other are collapsed into the baseline
+
+```{r,echo=FALSE}
+train_set_final <- train_set %>%
+  select(-Deduc, -PolicyAgeCateg, -FleetMgt, -FleetSizeCateg, -PayFreq, -ChannelDist) %>%
+  mutate(
+    Area        = factor(Area),
+    PolicyCateg = factor(PolicyCateg),
+    BusinessType = factor(BusinessType),
+    VehiclPower = factor(VehiclPower)
+  ) %>%
+  mutate(
+    # Area: collapse A2, A3, A4, A6 into "Other"
+    Area = fct_collapse(Area,
+      "Other" = c("A2", "A3", "A4", "A6")
+    ),
+    # PolicyCateg: collapse C3 and existing Other into "Other"
+    PolicyCateg = fct_collapse(PolicyCateg,
+      "Other" = c("C3", "Other")
+    ),
+    # BusinessType: collapse B1, B2, B4, B5, B8 into "Other"
+    BusinessType = fct_collapse(BusinessType,
+      "Other" = c("B1", "B2", "B4", "B5", "B8")
+    ),
+    # VehiclPower: collapse P7, P3, P4, P5, P6, and Other into "Other"
+    VehiclPower = fct_collapse(VehiclPower,
+      "Other" = c("P7", "P3", "P4", "P5", "P6", "Other")
+    )
+  )
+
+train_set_final$Area         <- relevel(train_set_final$Area, ref = "Other")
+train_set_final$PolicyCateg  <- relevel(train_set_final$PolicyCateg, ref = "Other")
+train_set_final$BusinessType <- relevel(train_set_final$BusinessType, ref = "Other")
+train_set_final$VehiclPower  <- relevel(train_set_final$VehiclPower, ref = "Other")
+
+final_clean_model <- glm(
+  formula = Burning_Cost ~ CompanyCreation + VehiclAge + Area +
+    PolicyCateg + BusinessType + VehiclPower,
+  family = tweedie(var.power = optimal_p, link.power = 0),
+  data = train_set_final,
+  weights = Exposure
+)
+
+summary(final_clean_model)
+```
+Below is the rating Relativities extracted from the final model (before loadings)
+
+```{r}
+ratebook_relativities <- data.frame(
+  Parameter = names(coef(final_clean_model)),
+  Beta_Estimate = coef(final_clean_model)
+) %>%
+  mutate(Rating_Relativities = exp(Beta_Estimate))
+
+print(ratebook_relativities)
+```
+
+```{r,warning=FALSE,echo=FALSE,message=FALSE,results='hide'}
+# Apply identical feature selection and collapse transformations to the holdout test set
+test_set_final <- test_set %>%
+  select(-Deduc, -PolicyAgeCateg, -FleetMgt, -FleetSizeCateg, -PayFreq, -ChannelDist) %>%
+  mutate(
+    Area         = factor(Area),
+    PolicyCateg  = factor(PolicyCateg),
+    BusinessType = factor(BusinessType),
+    VehiclPower  = factor(VehiclPower)
+  ) %>%
+  mutate(
+    # Collapse the same levels into "Other"
+    Area = fct_collapse(Area,
+      "Other" = c("A2", "A3", "A4", "A6")
+    ),
+    PolicyCateg = fct_collapse(PolicyCateg,
+      "Other" = c("C3", "Other")
+    ),
+    BusinessType = fct_collapse(BusinessType,
+      "Other" = c("B1", "B2", "B4", "B5", "B8")
+    ),
+    VehiclPower = fct_collapse(VehiclPower,
+      "Other" = c("P7", "P3", "P4", "P5", "P6", "Other")
+    )
+  )
+
+# Enforce matching reference levels
+test_set_final$Area         <- relevel(test_set_final$Area, ref = "Other")
+test_set_final$PolicyCateg  <- relevel(test_set_final$PolicyCateg, ref = "Other")
+test_set_final$BusinessType <- relevel(test_set_final$BusinessType, ref = "Other")
+test_set_final$VehiclPower  <- relevel(test_set_final$VehiclPower, ref = "Other")
+
+# 1. Generate out-of-sample expected pure premiums (type = "response" yields raw currency units)
+test_set_final$Predicted_BC <- predict(final_clean_model, newdata = test_set_final, type = "response")
+
+# 2. Extract and print your final multiplicative pricing multipliers for your documentation
+ratebook_factors <- data.frame(
+  Feature_Level = names(coef(final_clean_model)),
+  Beta_Estimate = coef(final_clean_model)
+) %>%
+  mutate(Pricing_Multiplier = exp(Beta_Estimate))
+
+print("--- Final Ratebook Multiplicative Factors ---")
+print(ratebook_factors)
+```
+
+## Model Validation
+
+### Statistical Significance
+As shown in the final model output previously, nearly all retained rating factors are statistically significant at the 10% level, with only one level (BusinessType B7) falling slightly outside the threshold. This provides confidence that the selected variables are meaningfully related to burning costs.
+
+### Actual-to-Expected (A/E) Ratio
+Below is a comparison between the actual vs expected burning cost on the unseen test data
+
+```{r, echo=FALSE}
+actual_bc <- sum(test_set_final$Burning_Cost * test_set_final$Exposure)
+expected_bc <- sum(test_set_final$Predicted_BC * test_set_final$Exposure)
+
+ae_ratio <- actual_bc / expected_bc
+
+data.frame(
+  Actual = actual_bc,
+  Expected = expected_bc,
+  AE_Ratio = ae_ratio
+)
+```
+
+The Actual-to-Expected (A/E) ratio is used to check whether the model is getting the overall pricing level right by comparing actual losses against predicted losses.
+
+In an ideal scenario, the A/E ratio would equal 1.00, meaning that actual and expected losses are perfectly aligned. For the unseen test dataset, the model produced an A/E ratio of 0.973, indicating that actual burning costs were only 2.7% lower than predicted. This is a very small difference and suggests that the GLM is well calibrated at the portfolio level.
+
+### Lift Chart
+Below is the exposure-weighted lift chart comparing predicted and observed burning costs across the unseen test dataset.
+
+```{r,warning=FALSE,echo=FALSE}
+# 1. Aggregate validation metrics into 10 exposure-weighted blocks
+lift_validation_df <- test_set_final %>%
+  arrange(Predicted_BC) %>%
+  mutate(
+    Cumulative_Exposure = cumsum(Exposure),
+    Total_Exposure       = sum(Exposure),
+    # Breaks data into 10 groups with equal exposure weight
+    Decile               = ceiling(10 * Cumulative_Exposure / Total_Exposure)
+  ) %>%
+  group_by(Decile) %>%
+  summarize(
+    Actual_Loss_Cost   = sum(Burning_Cost * Exposure) / sum(Exposure),
+    Predicted_Loss_Cost = sum(Predicted_BC * Exposure) / sum(Exposure),
+    Total_Group_Exposure = sum(Exposure),
+    .groups = "drop"
+  )
+
+print(lift_validation_df)
+
+# 2. Plot the Actuarial Lift Chart
+ggplot(lift_validation_df, aes(x = factor(Decile))) +
+  geom_bar(aes(y = Actual_Loss_Cost, fill = "Actual Burning Cost (Holdout)"), 
+           stat = "identity", alpha = 0.5, width = 0.6) +
+  geom_line(aes(y = Predicted_Loss_Cost, group = 1, color = "Model Predicted Burning Cost"), 
+            size = 1.2) +
+  geom_point(aes(y = Predicted_Loss_Cost), color = "darkblue", size = 2.5) +
+  scale_fill_manual(name = "", values = c("Actual Burning Cost (Holdout)" = "grey40")) +
+  scale_color_manual(name = "", values = c("Model Predicted Burning Cost" = "darkblue")) +
+  labs(
+    title = "Direct Burning Cost Lift Validation Graph",
+    subtitle = "Tested Entirely on Unseen Test Set (Exposure-Weighted Deciles)",
+    x = "Model Predicted Risk Decile (1 = Lowest Risk, 10 = Highest Risk)",
+    y = "Average Burning Cost"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 13))
+```
+
+The Lift chart is mainly used to evaluate 2 things in regard to a GLM pricing model, which are:
+
+- *Risk Segmentation:* In an ideal lift chart, the blue line (predicted burning costs) should rise steadily across the deciles. We observe a reasonably steep upward slope in the graph above, suggesting that the model is able to differentiate between higher- and lower-risk policyholders. However, this conclusion should be considered alongside other validation measures, such as the Gini Index, to assess the strength of the observed risk segmentation.
+
+- *Ranking Stability:* In an ideal lift chart, the gray bars (actual burning costs) would also rise smoothly across the deciles. In the graph above, the bars generally move upward but with a few noticeable fluctuations. This suggests that the model's risk ranking remains broadly stable despite some claim volatility due to low frequency and volatile severity. 
+
+### Gini Index & Lorenz Curve
+
+```{r,echo=FALSE}
+lorenz_df <- test_set_final %>%
+  arrange(Predicted_BC) %>%
+  mutate(
+    Cum_Exposure = cumsum(Exposure) / sum(Exposure),
+    Cum_Loss = cumsum(Burning_Cost * Exposure) /
+               sum(Burning_Cost * Exposure)
+  )
+
+gini <- 1 - 2 * sum(
+  diff(c(0, lorenz_df$Cum_Exposure)) *
+    (head(c(0, lorenz_df$Cum_Loss), -1) +
+     tail(c(0, lorenz_df$Cum_Loss), -1)) / 2
+)
+
+ggplot(lorenz_df, aes(x = Cum_Exposure, y = Cum_Loss)) +
+  geom_line(size = 1.2, colour = "darkblue") +
+  geom_abline(intercept = 0, slope = 1,
+              linetype = "dashed", colour = "grey50") +
+  labs(
+    title = paste0("Lorenz Curve (Gini = ", round(gini, 3), ")"),
+    x = "Cumulative Exposure",
+    y = "Cumulative Burning Cost"
+  ) +
+  theme_minimal()
+```
+
+Both the Gini Index and Lorenz curve are used to assess the ability of the rating plan to differentiate between lower- and higher-risk policyholders, also known as risk segmentation. The model achieved a Gini Index of 19.1%, suggesting a moderate-to-low level of risk differentiation and indicating that additional predictors could further improve risk segmentation. The same conclusion can be drawn from the Lorenz curve. Ideally, we would expect the blue line to bow much further away from the dashed line of equality. The relatively modest separation observed above is consistent with the Gini Index of 19.1% and suggests moderate-to-low risk segmentation.
+
+### Validation Conclusion
+Overall, the validation results are encouraging. The A/E ratio of 0.973 shows that the model is pricing the portfolio at roughly the right level, while the retained rating factors are generally statistically significant and behave as expected.
+
+The main weakness of the model lies in risk segmentation. Although the lift chart shows some separation between lower and higher risk policyholders, the Gini Index of 19.1% suggests that the distinction is only moderate. This indicates that the model is better at estimating overall portfolio costs than at finely separating the safest and riskiest risks, leaving room for improvement through additional predictors.
+
+# Final Results
+
+Now i will introduce back the recovery adjustment as well as the other pricing loading assumptions to Finalize the rating Relativities and base premium
+
+```{r}
+# Recovery adjustment derived from claims data
+Recovery_Adjustment
+
+# IA pricing review report loading assumptions
+Expense_Loading     <- 0.171
+Profit_Loading      <- 0.020
+Contingency_Loading <- 0.022
+Other_Loading       <- 0.002
+Commission_Loading  <- 0.117
+
+# Total pricing loading
+Pricing_Loading <- Expense_Loading +
+                   Profit_Loading +
+                   Contingency_Loading +
+                   Other_Loading +
+                   Commission_Loading
+
+Pricing_Loading
+# 33.3%
+```
+
+
+```{r,echo=FALSE}
+test_set_final <- test_set_final %>%
+  mutate(
+    Pure_Premium = Predicted_BC,
+
+    # Reintroduce recoveries
+    Premium_After_Recovery =
+      Pure_Premium * (1 - Recovery_Adjustment),
+
+    # Apply overall pricing loading
+    Final_Indicated_Premium =
+      Premium_After_Recovery * (1 + Pricing_Loading)
+  )
+```
+
+Below is a summary of the rating relativities as well as the final base premium after the loadings
+
+```{r,echo=FALSE}
+base_intercept <- as.numeric(coef(final_clean_model)["(Intercept)"])
+
+Base_Pure_Premium <- exp(base_intercept)
+
+Base_Premium_After_Recovery <-
+  Base_Pure_Premium * (1 - Recovery_Adjustment)
+
+Final_Base_Premium <-
+  Base_Premium_After_Recovery * (1 + Pricing_Loading)
+
+
+base_premium_table <- tibble(
+  Metric = c(
+    "Base Pure Premium",
+    "After Recovery Adjustment",
+    "Final Base Premium After Loadings"
+  ),
+  Value = round(
+    c(
+      Base_Pure_Premium,
+      Base_Premium_After_Recovery,
+      Final_Base_Premium
+    ),
+    2
+  )
+) %>%
+  kbl(
+    format = "html",
+    caption = "Base Premium Summary",
+    col.names = c("Metric", "Value"),
+    align = c("l", "r")
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed")
+  ) %>%
+  row_spec(0, bold = TRUE, background = "#D9EAF7")
+
+base_premium_table
+
+
+factor_vars <- c(
+  "CompanyCreation",
+  "VehiclAge",
+  "Area",
+  "PolicyCateg",
+  "BusinessType",
+  "VehiclPower"
+)
+
+ratebook_factors <- tibble(
+  Parameter = names(coef(final_clean_model)),
+  Beta_Estimate = as.numeric(coef(final_clean_model))
+) %>%
+  mutate(Rating_Relativities = exp(Beta_Estimate)) %>%
+  filter(Parameter != "(Intercept)") %>%
+  mutate(
+    Variable = purrr::map_chr(Parameter, function(p) {
+      hit <- factor_vars[stringr::str_starts(p, factor_vars)]
+      if (length(hit) == 0) return(NA_character_)
+      hit[1]
+    }),
+    Level = stringr::str_remove(Parameter, paste0("^", Variable)),
+    Relativity = round(Rating_Relativities, 3)
+  ) %>%
+  select(Variable, Level, Relativity)
+
+baseline_rows <- tibble(
+  Variable = factor_vars,
+  Level = purrr::map_chr(factor_vars, ~ levels(train_set_final[[.x]])[1]),
+  Relativity = 1
+)
+
+base_premium_row <- tibble(
+  Variable = "Base Premium",
+  Level = "",
+  Relativity = round(Final_Base_Premium, 2)
+)
+
+ratebook_display <- bind_rows(
+  base_premium_row,
+  baseline_rows,
+  ratebook_factors
+) %>%
+  arrange(factor(Variable, levels = c("Base Premium", factor_vars)))
+
+ratebook_table <- ratebook_display %>%
+  kbl(
+    format = "html",
+    caption = "Final Rating Relativities",
+    col.names = c("Variable", "Level", "Value"),
+    align = c("l", "l", "r")
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed")
+  ) %>%
+  row_spec(0, bold = TRUE, background = "#D9EAF7") %>%
+  row_spec(1, bold = TRUE)
+
+ratebook_table
+```
+
+
+
+
+
+
+
