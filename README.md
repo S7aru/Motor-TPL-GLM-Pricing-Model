@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project develops a motor TPL pricing model using data from the Actuarial Pricing Game organised by the French Institute of Actuaries.
+This project develops a motor TPL pricing model using real insurer data from the Actuarial Pricing Game organised by the French Institute of Actuaries.
 
 The primary focus is not the GLM itself, but the actuarial judgement required to address real-world data limitations. The project documents the assumptions, preprocessing decisions, and modelling choices used to transform raw insurance data into a pricing-ready dataset and derive final rating relativities using a Tweedie GLM.
 
@@ -35,11 +35,11 @@ These limitations required a series of actuarial assumptions and preprocessing d
 
 Several preprocessing steps and actuarial assumptions were required before modelling:
 
-- Policy exposure was calculated from policy inception and expiry dates.
+- Policy exposure was calculated from policy inception and expiry dates as.
 - A new unique identifier was constructed to address non-unique policy records caused by mid-term endorsements.
 - Claim amounts were assumed to represent ultimate losses due to the absence of accident and payment dates.
 - Traditional actuarial loss trending was not possible due to the absence of accident dates and payment histories. Instead, a flat annual trend rate was estimated from historical burning costs and applied to adjust claims to a common cost level.
-- Negative claim amounts, primarily arising from salvage and subrogation recoveries, were aggregated at the policy level and floored at zero for modelling purposes. The overall impact of recoveries was then captured separately through a portfolio-level recovery adjustment.
+- Negative claim amounts, primarily arising from salvage and subrogation recoveries, were floored at zero for modelling purposes. The overall impact of recoveries was then captured separately through a portfolio-level recovery adjustment.
 - Claims were aggregated to the policy level and converted into burning costs, which served as the modelling target variable.
 
 ## Feature Engineering
