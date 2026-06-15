@@ -63,7 +63,8 @@ The Tweedie variance power parameter was calibrated empirically by fitting a ran
 
 The optimal variance power parameter was found to be approximately 1.55 and was subsequently used in the final model.
 
-*[Insert Tweedie Optimization Figure Here]*
+*(Motor-TPL-GLM-Pricing-Model/figures
+/Tweedie_optimization.png)*
 
 *Figure 1: Profile likelihood used to identify the optimal Tweedie variance power parameter.*
 
