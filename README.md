@@ -142,3 +142,7 @@ Retained rating factors include:
 - Vehicle Power
 
 ![Rating Relativities](figures/relativities.png)
+
+# Sources
+- Basic Ratemaking Fifth Edition by Geoff Werner, FCAS, MAAA (CAS Materials)
+- Generalized Linear Models For Insurance Rating Second Edition by Mark Goldburd, FCAS, MAAA (CAS Monograph Series Number 5)
