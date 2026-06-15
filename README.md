@@ -63,16 +63,13 @@ The Tweedie variance power parameter was calibrated empirically by fitting a ran
 
 The optimal variance power parameter was found to be approximately 1.55 and was subsequently used in the final model.
 
-*(Motor-TPL-GLM-Pricing-Model/figures
-/Tweedie_optimization.png)*
+![Tweedie Optimization](figures/Tweedie_optimization.png)
 
 *Figure 1: Profile likelihood used to identify the optimal Tweedie variance power parameter.*
 
-The final model was refined using a combination of statistical significance, exposure credibility, and actuarial judgement.
-
 ## Model Validation
 
-The final model was validated using an unseen 20% holdout sample.
+The final model was validated using an unseen 20% test data based on multiple approaches, which are:
 
 ### Statistical Significance
 
@@ -90,7 +87,7 @@ Exposure-weighted lift charts were used to assess the model's ability to rank ri
 
 The predicted burning costs generally increased across risk deciles, suggesting that the model is able to distinguish between lower- and higher-risk policyholders. Observed burning costs followed a broadly similar pattern, although some fluctuations were present due to claim volatility.
 
-*[Insert Lift Chart Here]*
+![Lift Chart](figures/lift_chart.png)
 
 ### Gini Index & Lorenz Curve
 
@@ -98,7 +95,7 @@ The discriminatory power of the rating plan was assessed using the Gini Index an
 
 The model achieved a Gini Index of approximately 19%, suggesting a moderate-to-low level of risk segmentation. While some separation between lower- and higher-risk policyholders is evident, the results indicate that additional predictors could further improve the model's discriminatory power.
 
-*[Insert Lorenz Curve Here]*
+![Lorenz Curve](figures/lorenz_curve.png)
 
 ## Final Rating Plan
 
@@ -110,11 +107,20 @@ Negative claim transactions arising from salvage and subrogation recoveries were
 
 Pure premiums were adjusted for recoveries and subsequently loaded for expenses, commissions, profit, contingency, and other business requirements. The loading assumptions were sourced from the IA pricing review report and applied to derive final indicated premiums.
 
+| Pricing Loading | Rate |
+|----------------|------|
+| Expense Loading | 17.1% |
+| Commission Loading | 11.7% |
+| Contingency Loading | 2.2% |
+| Profit Loading | 2.0% |
+| Other Loading | 0.2% |
+| **Total Pricing Loading** | **33.2%** |
+
 ### Base Premium
 
 The model intercept was converted into a base premium and adjusted for recoveries and pricing loadings.
 
-*[Insert Base Premium Table Here]*
+![Base Premium](figures/base_premium.png)
 
 ### Rating Relativities
 
@@ -129,4 +135,4 @@ Retained rating factors include:
 - Business Type
 - Vehicle Power
 
-*[Insert Final Rating Relativities Table Here]*
+![Rating Relativities](figures/rating_relativities.png)
